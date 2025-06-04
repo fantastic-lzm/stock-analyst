@@ -5,6 +5,27 @@ import time
 import re
 import random
 from bs4 import BeautifulSoup
+import datetime
+import sys
+
+# 创建日志记录函数，替代print
+original_print = print
+log_file = None
+
+def log_print(*args, **kwargs):
+    # 获取当前时间
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    # 构建带时间戳的消息
+    message = f"[{timestamp}] " + " ".join(map(str, args))
+    # 调用原始print输出到控制台
+    original_print(message, **kwargs)
+    # 写入日志文件
+    if log_file:
+        log_file.write(message + "\n")
+        log_file.flush()  # 确保立即写入文件
+
+# 替换全局print函数
+print = log_print
 
 def get_stock_code(company_name):
     """通过新浪API查询股票代码"""
@@ -22,12 +43,23 @@ def get_stock_code(company_name):
         print(f"查询{company_name}股票代码失败: {e}")
     return None
 
+def set_report_link(_title, reports, file_path):
+    """根据返回数据找到符合要求的PDF链接"""
+    title = _title.replace(' ', '')
+    if '年度报告' in title and '摘要' not in title and '英文' not in title:
+        year_match = re.search(r'(\d{4})年', title)
+        if year_match:
+            year = year_match.group(1)
+            if year in reports:
+                print(f"  title: {title}, pdf_url: {file_path}")
+                reports[year] = file_path
+
 def get_report_links(stock_code, company_name, current_index, total_count):
     """根据股票代码获取年报PDF链接"""
     if not stock_code:
         return {}
         
-    reports = {str(year): "" for year in range(2020, 2025)}
+    reports = {str(year): "" for year in range(2018, 2025)}
     max_retries = 2
     timeout = 10
     headers = {
@@ -45,7 +77,7 @@ def get_report_links(stock_code, company_name, current_index, total_count):
                     params = {
                         "jsonCallBack": "jsonpCallback83303800",
                         "isPagination": "true",
-                        "pageHelp.pageSize": 25,
+                        "pageHelp.pageSize": 50,
                         "pageHelp.pageNo": 1,
                         "pageHelp.beginPage": 1,
                         "pageHelp.cacheSize": 1,
@@ -62,23 +94,17 @@ def get_report_links(stock_code, company_name, current_index, total_count):
                     api_headers['Referer'] = 'https://www.sse.com.cn'
                     res = requests.get(api_url, params=params, headers=api_headers, timeout=timeout)
                     res.raise_for_status()
-                    print(f"[{current_index}/{total_count}] {company_name}({stock_code}) 上交所API请求状态: 200, 返回数据: {res.text[:100]}...")
+                    # "\033[32m这是绿色字体\033[0m"
+                    print(f"\033[32m[{current_index}/{total_count}] {company_name}({stock_code}) 上交所API请求状态: 200, 返回数据: {res.text[:40]}...\033[0m")
                     
                     # 解析JSONP响应
                     json_str = res.text[len(params['jsonCallBack'])+1:-1]
                     data = json.loads(json_str)
-                    
-                    if data.get('result'):
-                        for item in data['result']:
+                    result = data.get('result', [])
+                    if len(result) > 0:
+                        for item in result:
                             title = item.get('TITLE', '')
-                            if '年度报告' in title and '摘要' not in title:
-                                year_match = re.search(r'(\d{4})年', title)
-                                if year_match:
-                                    year = year_match.group(1)
-                                    if year in reports:
-                                        pdf_url = f"http://www.sse.com.cn{item['URL']}"
-                                        print(f"  title: {title}, pdf_url: {pdf_url}")
-                                        reports[year] = pdf_url
+                            set_report_link(title, reports, f"http://www.sse.com.cn{item['URL']}")
                             
                 elif stock_code.startswith('sz'):
                     # 深交所年报查询 - 使用API接口
@@ -94,18 +120,13 @@ def get_report_links(stock_code, company_name, current_index, total_count):
                     }
                     res = requests.post(api_url, json=params, headers=headers, timeout=timeout)
                     res.raise_for_status()
-                    print(f"[{current_index}/{total_count}] {company_name}({stock_code}) 深交所API请求状态: 200, 返回数据: {res.text[:100]}...")
+                    print(f"\033[32m[{current_index}/{total_count}] {company_name}({stock_code}) 深交所API请求状态: 200, 返回数据: {res.text[:40]}...\033[0m")
                     data = res.json()
-                    print(f"sjs ---- data len: {data}")
-                    if data.get('code') == 0:
-                        print(f"data len: {len(data.get('data', []))}")
-                        for item in data.get('data', []):
-                            if '年度报告' in item.get('title', '') and '摘要' not in item.get('title', ''):
-                                year = item['title'][:4]
-                                if year in reports:
-                                    pdf_url = f"https://www.szse.cn{item['adjunctUrl']}"
-                                    reports[year] = pdf_url
-                                    print(f"  title: {item.get('title', '')}, pdf_url: {pdf_url}")
+                    dataList = data.get('data', [])
+                    if len(dataList) > 0:
+                        for item in dataList:
+                            title = item.get('title', '')
+                            set_report_link(title, reports, f"https://disc.static.szse.cn/download{item['attachPath']}")
                 
                 time.sleep(3)  # 控制请求频率
                 break  # 成功则跳出重试循环
@@ -198,6 +219,9 @@ if __name__ == "__main__":
     input_file = "stock-list.xlsx"
     output_file = "stockData.js"
     
+    # 初始化日志文件
+    log_file = open("log.txt", "w", encoding="utf-8")
+    
     print("开始处理股票数据...")
     structured_data = read_excel_to_dict(input_file)
     
@@ -205,3 +229,7 @@ if __name__ == "__main__":
     save_to_js(structured_data, output_file)
     
     print(f"数据已成功导出到 {output_file}")
+    
+    # 关闭日志文件
+    if log_file:
+        log_file.close()
